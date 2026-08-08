@@ -428,7 +428,8 @@ jobs:
             exit 1
           fi
 
-      # ---- 组装 AppDir：AppImage 要求 usr/bin + .desktop + 图标 ----
+      # ---- 组装 AppDir：AppImage 要求根目录 .desktop + 图标（appimagetool 识别上限），
+      #      同时写入 usr/share 规范位置供桌面环境索引 ----
       - name: Assemble AppDir
         run: |
           set -euo pipefail
@@ -436,9 +437,6 @@ jobs:
           rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" \
             "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
           cp "target/release/${APP_NAME}" "$APPDIR/usr/bin/"
-          # 图标：用 iconset 里的 512x512 PNG（与运行时图标同算法生成）
-          cp "AppIcon.iconset/icon_512x512.png" \
-            "$APPDIR/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png"
           cat > "$APPDIR/usr/share/applications/${APP_NAME}.desktop" <<EOF
           [Desktop Entry]
           Type=Application
@@ -453,6 +451,12 @@ jobs:
           StartupWMClass=${APP_NAME}
           Keywords=flypy;rime;dictionary;
           EOF
+          # appimagetool (continuous build 295+) 必须在 AppDir 根目录找到 .desktop，
+          # 否则报 "Desktop file not found, aborting"；图标同样备份到根目录供其识别。
+          cp "$APPDIR/usr/share/applications/${APP_NAME}.desktop" "$APPDIR/${APP_NAME}.desktop"
+          cp "AppIcon.iconset/icon_512x512.png" "$APPDIR/${APP_NAME}.png"
+          cp "AppIcon.iconset/icon_512x512.png" \
+            "$APPDIR/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png"
 
       - name: Download appimagetool
         run: |
