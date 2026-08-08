@@ -370,12 +370,125 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------
+  # 3.5 Linux Build — AppImage（push 阶段跑，PR 跳过）
+  # ---------------------------------------------------------------
+  build-linux:
+    name: Build Linux (AppImage)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo & target
+        uses: Swatinem/rust-cache@v2
+
+      # egui/eframe (glow 后端) 需要 X11/GL/Wayland 开发库，reqwest rustls 不需 openssl，
+      # 但 libayatana-appindicator 由 eframe/glow 的 tray 可选 feature 依赖，未启用则跳过。
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libwayland-dev \
+            file desktop-file-utils
+
+      - name: Build (Release)
+        run: cargo build --release --locked
+
+      - name: Strip binary
+        run: strip target/release/${APP_NAME}
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F'"' '/^version =/ {print $2; exit}' Cargo.toml)
+          [ -n "$VERSION" ] || { echo "::error::Failed to parse version from Cargo.toml"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify tag version matches Cargo.toml
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "$APP_VERSION" ]; then
+            echo "::error::Tag version (v$TAG) does not match Cargo.toml version ($APP_VERSION)"
+            echo "::error::Bump version in Cargo.toml or fix the tag."
+            exit 1
+          fi
+
+      # ---- 组装 AppDir：AppImage 要求 usr/bin + .desktop + 图标 ----
+      - name: Assemble AppDir
+        run: |
+          set -euo pipefail
+          APPDIR="target/release/AppDir"
+          rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" \
+            "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
+          cp "target/release/${APP_NAME}" "$APPDIR/usr/bin/"
+          # 图标：用 iconset 里的 512x512 PNG（与运行时图标同算法生成）
+          cp "AppIcon.iconset/icon_512x512.png" \
+            "$APPDIR/usr/share/icons/hicolor/512x512/apps/${APP_NAME}.png"
+          cat > "$APPDIR/usr/share/applications/${APP_NAME}.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=小鹤音形词典
+          Name[en]=Xiaohe Yinxing Dictionary
+          GenericName=Dictionary
+          Comment=小鹤音形(flypy)输入法离线查询工具
+          Exec=${APP_NAME}
+          Icon=${APP_NAME}
+          Terminal=false
+          Categories=Education;Utility;
+          StartupWMClass=${APP_NAME}
+          Keywords=flypy;rime;dictionary;
+          EOF
+
+      - name: Download appimagetool
+        run: |
+          set -euo pipefail
+          APPIMAGE_TOOL="appimagetool-x86_64.AppImage"
+          curl -Lso "$APPIMAGE_TOOL" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/${APPIMAGE_TOOL}"
+          chmod +x "$APPIMAGE_TOOL"
+
+      - name: Bundle AppImage
+        run: |
+          set -euo pipefail
+          # --appimage-extract-and-run 避免 runner 上 FUSE 不可用/受限问题
+          ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
+            "target/release/AppDir" "target/release/${APP_NAME}-linux-x86_64.AppImage"
+          chmod +x "target/release/${APP_NAME}-linux-x86_64.AppImage"
+          file "target/release/${APP_NAME}-linux-x86_64.AppImage"
+          shasum -a 256 "target/release/${APP_NAME}-linux-x86_64.AppImage" \
+            | awk '{print $1}' > "target/release/${APP_NAME}-linux-x86_64.AppImage.sha256"
+
+      - name: Upload AppImage (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaohe-yinxing-dict-linux-x86_64
+          path: |
+            target/release/${{ env.APP_NAME }}-linux-x86_64.AppImage
+            target/release/${{ env.APP_NAME }}-linux-x86_64.AppImage.sha256
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
   # 4. Release — 仅在 tag 触发时跑（当前唯一触发器）
   # ---------------------------------------------------------------
   release:
     name: Publish GitHub Release
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -433,6 +546,12 @@ jobs:
           name: xiaohe-yinxing-dict-macos-aarch64-zip
           path: artifacts
 
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: xiaohe-yinxing-dict-linux-x86_64
+          path: artifacts
+
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
@@ -449,3 +568,5 @@ jobs:
             artifacts/${{ env.DMG_VOLNAME }}-macos-aarch64.zip.sha256
             artifacts/小鹤音形词典-windows.zip
             artifacts/小鹤音形词典-windows.zip.sha256
+            artifacts/${{ env.APP_NAME }}-linux-x86_64.AppImage
+            artifacts/${{ env.APP_NAME }}-linux-x86_64.AppImage.sha256
